@@ -1,0 +1,65 @@
+# Ethernet/IP Point I/O Stack-Light Sequencer
+
+**A ControlLogix distributed-I/O ladder-logic project that sequences an industrial four-color stack light over an Ethernet/IP network, built on the Allen-Bradley 1756 / 1734 platform.**
+
+---
+
+## Project Overview
+
+This project is a graduate lab assignment (Lab 8) in the *EE 5340 Advanced PLC* course. The objective was to configure a full Ethernet/IP distributed-I/O subnet in Studio 5000 Logix Designer and program a ControlLogix processor to drive a stack light through a timed, operator-controlled lamp sequence using only remote Point I/O modules — no local discrete I/O on the controller chassis.
+
+The deliverable exercises the end-to-end workflow an entry-level controls engineer performs on a real cell: building an I/O tree from scratch, assigning IP addresses on the plant subnet, setting electronic keying and the requested packet interval (RPI) on the remote adapter, aliasing raw module tags into meaningful process names, and implementing a latch/unlatch state machine with TON-timer dwell that survives pause/resume from the operator pushbuttons.
+
+## Learning Objectives
+
+The lab was designed to build practical competence in areas that map directly to field commissioning work. It was intended to develop working knowledge of Ethernet/IP and CIP configuration in Studio 5000, hands-on experience adding a 1756-EN2TR scanner and attaching a 1734-AENT Point I/O chassis to it, proper module commissioning (series, revision, chassis size, RPI, electronic keying), tag aliasing from raw module addresses to descriptive program tags, and implementation of a finite-state-machine sequencer in Ladder Diagram using OTL/OTU latching with TON dwell timers.
+
+## System Architecture
+
+The cell is organized around a single ControlLogix processor that scans a remote Point I/O chassis over Ethernet/IP. All process I/O — both the Start/Stop pushbuttons and the four stack-light lamps — is resolved through the remote adapter, which keeps the chassis wiring clean and lets the same processor later manage several distributed Point I/O drops if the cell is extended.
+
+Logically the application is a flat, linear sequencer. A single **MainRoutine** under the **MainTask** hosts six rungs of ladder: a Run-latch rung that captures operator intent, a first-scan reset rung that guarantees the sequence always restarts at Step_1, and four identical sequencer rungs — one per lamp — that each energize an output, start a timer, and advance the step bit on timer-done via an OTU/OTL pair. This structure keeps the logic easy to extend: adding another step is a single rung insertion, and the first-scan reset rung automatically accommodates it.
+
+### Hardware Stack
+
+The implementation uses an Allen-Bradley **1756-L71 ControlLogix 5570** controller in slot 5 of a 1756-A10 10-slot backplane, paired with a **1756-EN2TR** two-port Ethernet/IP bridge in slot 7 acting as the scanner for the remote chassis. The scanner is addressed at `131.151.52.192` on the plant ECE Department subnet. Downstream of the scanner is a **1734-AENT/B Point I/O Ethernet adapter** at `131.151.52.150`, configured as a 3-slot chassis (the adapter itself counts as the first slot) with a 20 ms RPI and compatible-module electronic keying. Slot 1 is populated with a **1734-IB8/C** 8-point 10–28 V DC sinking input module (Series C, Rev 3) that captures the Start and Stop pushbuttons on channels 0 and 1. Slot 2 is a **1734-OB8/C** 8-point relay output module (Series C, Rev 3) wired to the blue, green, yellow, and red lenses of the stack light on channels 0 through 3.
+
+### Software Stack
+
+The firmware is written entirely in **Ladder Diagram** inside **Studio 5000 Logix Designer**, organized under the single `MainTask` / `MainProgram` / `MainRoutine` the controller project was initialized with. Four module-defined data types — `AB:1734_3SLOT:I:0`, `AB:1734_3SLOT:O:0`, `AB:1734_DI8:C:0`, and `AB:1734_DO8_NoDiag:C:0` — are generated automatically when the I/O tree is built and are used as the base types for the `PointIO_Adapter:1:I`, `PointIO_Adapter:2:O`, and configuration tags. All operator-facing names (`Start_PB`, `Stop_PB`, `Blue_LA`, `Green_LA`, `Yellow_LA`, `Red_LA`) are defined as **Alias** tags pointing at the raw adapter bits (`PointIO_Adapter:1:I.Data[1].0/.1` and `PointIO_Adapter:2:O.Data[2].0–.3`), so the ladder reads as plain English and the program is insulated from any future slot renumbering.
+
+## Phase-by-Phase Progression
+
+### Phase 1 — Network and I/O Tree Configuration
+
+The first phase built the Ethernet/IP I/O tree from the ground up. The 1756-EN2TR scanner was added to the controller's I/O Configuration following the class-wide convention, then the 1734-AENT adapter was attached beneath its Ethernet port with the lab-assigned address `131.151.52.150`, revision 5.1, and a chassis size of 3 (the adapter counts as one module). The IB8/C input and OB8/C output modules were added under the AENT with their fixed slots (1 and 2), series C, and revision 3. Each module was given a descriptive name so the auto-generated tags (`PointIO_Adapter:1:I`, `PointIO_Adapter:2:O`, `PointIO_Adapter:1:C`, `PointIO_Adapter:2:C`) surface cleanly in the tag browser. Compatible-module electronic keying was chosen over exact-match to tolerate minor firmware mismatches during bench swaps, and a 20 ms RPI was set on the adapter — fast enough for one-second resolution on the light sequence without generating unnecessary network traffic.
+
+### Phase 2 — Ladder Logic Implementation
+
+Once the I/O tree was verified by downloading and toggling the raw discrete output bits from the tag browser, the logic was authored. Rung 0 is a seal-in circuit: a series contact on `Start_PB` with a parallel branch on `Run` drives `Run` through a normally closed `Stop_PB`, so pressing Start latches Run and pressing Stop breaks the seal. Rung 1 enforces sequence initialization — if Run is true and none of `Step_1`, `Step_2`, `Step_3`, or `Step_4` is set, it latches `Step_1`, which guarantees the first lamp fires immediately on start and that every restart picks up from the beginning. Rungs 2 through 5 are the four lamp steps. Each step rung energizes its lamp alias (`Blue_LA`, `Green_LA`, `Yellow_LA`, `Red_LA`) directly from the active step bit and Run, and starts its corresponding **TON** timer (`Blue_Tmr`, `Green_Tmr`, `Yellow_Tmr` at preset 1000 ms; `Red_Tmr` at 5000 ms to let the self-flashing red lens play). On `Tmr.DN` the rung fires an **OTU** on the current step and an **OTL** on the next step, wrapping from `Step_4` back to `Step_1` so the sequence cycles indefinitely.
+
+### Phase 3 — Commissioning & Verification
+
+Commissioning followed the standard Studio 5000 bench workflow: download, confirm all four modules report `Standby`/`Running` in the I/O tree, then exercise each input and output with the processor in Run. The input module was verified by pressing each pushbutton and watching `PointIO_Adapter:1:I.Data[1].0` and `.1` toggle in the controller-tag view; the output module was verified by forcing each lamp-alias bit and confirming the correct lens illuminated. With raw I/O confirmed, the full sequence was tested end-to-end: pressing Start fires Blue for 1 s, advances to Green for 1 s, then Yellow for 1 s, then Red for 5 s (flashing on its own), and repeats; pressing Stop extinguishes the active lamp and holds the sequence; pressing Start again resumes from the beginning of the next sequence step. The complete module-properties and tag listing reports were generated from Studio 5000 as the submitted deliverable.
+
+## Key Technical Accomplishments
+
+The finished system exercises a complete Ethernet/IP distributed-I/O workflow from empty project to running cell. Specific accomplishments include a fully specified I/O tree with a correctly scoped 1756-EN2TR scanner and a 1734-AENT/B adapter on the assigned plant IP; a 3-slot Point I/O chassis populated with a 1734-IB8/C sinking input module and a 1734-OB8/C relay output module, both commissioned with the correct series, revision, keying, and RPI; a clean tag-alias layer that maps raw adapter bits into operator-readable process names (`Start_PB`, `Stop_PB`, `Blue_LA`, `Green_LA`, `Yellow_LA`, `Red_LA`); a compact six-rung ladder sequencer with a seal-in Run latch, first-scan step initialization, and four OTL/OTU step rungs driven by TON timers; and a pause/resume-capable sequence that correctly drops all lamps on Stop without losing operator intent and that restarts cleanly from Step_1 on the next Start press.
+
+## Skills Demonstrated
+
+The project exercised a cross-section of core skills for an entry-level controls engineer. On the programming side it covers Ladder Diagram authorship, OTL/OTU state latching, TON-timer dwell and timer-done edge logic, seal-in motor-starter patterns, and tag aliasing for program readability. On the architecture side it covers linear finite-state-machine design, centralized Run gating, and first-scan initialization for deterministic startup. On the hardware side it covers Point I/O adapter commissioning, chassis sizing, module series/revision management, electronic keying strategy, and discrete-module channel mapping. On the networking side it covers Ethernet/IP and CIP configuration in Studio 5000, static IP assignment on a plant subnet, RPI tuning appropriate to the control objective, and use of a 1756-EN2TR scanner to bridge the local 1756 backplane to a remote 1734 Point I/O chassis. And on the documentation side it covers generating a complete module-properties listing, tag cross-reference, and ladder report suitable for design handoff.
+
+## Tools & Technologies
+
+**Controller & networking:** Allen-Bradley 1756-L71 ControlLogix 5570 (Rev 37.11), 1756-EN2TR Ethernet/IP scanner (Rev 12.1), 1756-A10 10-slot chassis.
+
+**Distributed I/O:** 1734-AENT/B POINT I/O Ethernet adapter (Rev 5.1, 20 ms RPI), 1734-IB8/C 8-point 10–28 V DC sinking input (Series C, Rev 3), 1734-OB8/C 8-point relay output (Series C, Rev 3).
+
+**Software:** Rockwell Studio 5000 Logix Designer (Ladder Diagram, module-defined tags, alias tags, module-properties and tag-listing reports).
+
+**Standards & frameworks:** EtherNet/IP and CIP (ODVA), Rockwell Integrated Architecture I/O-tree conventions, latch/unlatch finite-state-machine ladder idioms.
+
+## Outcome
+
+The final deliverable is a working Point I/O stack-light sequencer that initializes cleanly on first scan, responds immediately to the Start pushbutton with a Blue-Green-Yellow-Red sequence on the configured timing, pauses cleanly on Stop without sticking a lamp, and resumes on the next Start press. Beyond the working demo, the most valuable outcome was the full round-trip experience of configuring an Ethernet/IP I/O tree from scratch and reasoning about the difference between raw module tags and descriptive alias tags — a small detail on a small lab, but the same pattern that every production Logix project relies on to stay maintainable as the I/O layout evolves.
